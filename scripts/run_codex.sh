@@ -1,37 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Inputs (override via env if your Codex install/run differ)
-: "${CODEX_INSTALL:=npm i -g @codex-ai/cli}"
-: "${CODEX_CMD:=codex run --prompt prompts/gke-latest.md}"
 : "${OPENAI_API_KEY:?OPENAI_API_KEY is required}"
 
-# Optional: Node is present via setup-node in the workflow
-shopt -s expand_aliases
+# Defaults (override in workflow env if needed)
+: "${CODEX_INSTALL:=npm install -g @openai/codex}"
+: "${CODEX_BIN:=codex}"                             # will try this first
+: "${CODEX_NPX:=npx @openai/codex}"                 # fallback if global not found
+: "${CODEX_CMD:=run --prompt prompts/gke-latest.md}"# codex subcommand & args
 
-# Install Codex CLI
 echo "[codex] installing…"
-$CODEX_INSTALL >/dev/null
+# install quietly but keep errors visible
+$CODEX_INSTALL
 
-# Ensure clean tree
+# Show version (best effort)
+if command -v "$CODEX_BIN" >/dev/null 2>&1; then
+  "$CODEX_BIN" --version || true
+else
+  $CODEX_NPX --version || true
+fi
+
+# Ensure clean tree before running (optional)
 git reset --hard
 git clean -fd
 
-# Run Codex with your prompt
-echo "[codex] running prompt…"
-eval "$CODEX_CMD"
+echo "[codex] running…"
+set +e
+if command -v "$CODEX_BIN" >/dev/null 2>&1; then
+  "$CODEX_BIN" $CODEX_CMD
+  CODE=$?
+else
+  $CODEX_NPX $CODEX_CMD
+  CODE=$?
+fi
+set -e
 
-# Format (optional)
+# Optional: gofmt if present
 if command -v gofmt >/dev/null 2>&1; then
   gofmt -s -w .
 fi
 
-# Did anything change?
+# Detect diff to decide if we should open a PR
 if git diff --quiet; then
   echo "changed=0" >> "$GITHUB_OUTPUT"
-  exit 0
+  exit $CODE
 else
   echo "changed=1" >> "$GITHUB_OUTPUT"
-  # leave changes staged/unstaged for the PR action to commit
   exit 0
 fi

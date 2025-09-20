@@ -1,4 +1,4 @@
-name: GKE Release Bot (Codex)
+name: GKE Stable Release Curator
 
 on:
   schedule:
@@ -35,15 +35,14 @@ jobs:
         id: codex
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # CODEX_PROMPT: prompts/gke-latest.md   # uncomment if your prompt path differs
+          # CODEX_PROMPT: prompts/gke-latest.md
         run: scripts/run_codex.sh
 
       - name: Create PR
         if: steps.codex.outputs.changed == '1'
         uses: peter-evans/create-pull-request@v6
         with:
-          # If your repo blocks GITHUB_TOKEN PRs, add a PAT secret and uncomment:
-          # token: ${{ secrets.CREATE_PR_TOKEN }}
+          # token: ${{ secrets.CREATE_PR_TOKEN }} # use if GITHUB_TOKEN can't open PRs
           commit-message: "chore(gke): add latest Stable R releases"
           title: "chore(gke): add latest Stable R releases"
           body: |

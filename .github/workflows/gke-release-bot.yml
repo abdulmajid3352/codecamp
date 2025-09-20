@@ -12,6 +12,15 @@ permissions:
 jobs:
   update-map:
     runs-on: ubuntu-latest
+    env:
+      # Force Codex authentication & model so CI doesn't guess.
+      CODEX_AUTH_METHOD: api-key
+      CODEX_PROVIDER: openai
+      CODEX_MODEL: gpt-4o-mini
+      # If your account requires these, add as repo secrets and uncomment:
+      # OPENAI_ORGANIZATION: ${{ secrets.OPENAI_ORGANIZATION }}
+      # OPENAI_PROJECT: ${{ secrets.OPENAI_PROJECT }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,37 +30,28 @@ jobs:
         uses: actions/setup-node@v4
         with: { node-version: "20" }
 
-      - name: Set up Go
+      - name: Set up Go (for gofmt)
         uses: actions/setup-go@v5
         with: { go-version: "1.22.x" }
 
-      - name: Verify OpenAI API key
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Install Codex
         run: |
-          test -n "$OPENAI_API_KEY" || (echo "OPENAI_API_KEY secret is empty"; exit 1)
-          code=$(curl -sS -o /tmp/resp.json -w "%{http_code}" \
-            -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models)
-          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
-            echo "OpenAI key test failed (HTTP $code). Body:"; cat /tmp/resp.json; exit 1
-          fi
-          echo "OpenAI key looks good (HTTP $code)."
+          npm install -g @openai/codex
+          codex --version
 
       - name: Run Codex (headless)
         id: codex
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          npm install -g @openai/codex
-          codex --version
+          test -f prompts/gke-latest.md || { echo "prompt not found: prompts/gke-latest.md"; exit 2; }
           git reset --hard
           git clean -fd
           set +e
-          # pass prompt contents; force widely-available model
-          OPENAI_API_KEY="$OPENAI_API_KEY" codex exec --full-auto --model gpt-4o "$(cat prompts/gke-latest.md)"
+          OPENAI_API_KEY="$OPENAI_API_KEY" codex exec --full-auto "$(cat prompts/gke-latest.md)"
           CODE=$?
           set -e
-          if command -v gofmt >/dev/null 2>&1; then gofmt -s -w .; fi
+          command -v gofmt >/dev/null 2>&1 && gofmt -s -w .
           if git diff --quiet; then
             echo "changed=0" >> "$GITHUB_OUTPUT"
           else
@@ -63,7 +63,7 @@ jobs:
         if: steps.codex.outputs.changed == '1'
         uses: peter-evans/create-pull-request@v6
         with:
-          # If your repo blocks PRs via GITHUB_TOKEN, add a PAT and uncomment:
+          # If your org blocks PRs from GITHUB_TOKEN, add a PAT and uncomment the next line:
           # token: ${{ secrets.CREATE_PR_TOKEN }}
           commit-message: "chore(gke): add latest Stable R releases"
           title: "chore(gke): add latest Stable R releases"

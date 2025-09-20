@@ -38,7 +38,7 @@ jobs:
           git reset --hard
           git clean -fd
           set +e
-          OPENAI_API_KEY="$OPENAI_API_KEY" codex exec --full-auto --search "$(cat prompts/gke-latest.md)"
+          OPENAI_API_KEY="$OPENAI_API_KEY" codex exec --full-auto "$(cat prompts/gke-latest.md)"
           CODE=$?
           set -e
           if command -v gofmt >/dev/null 2>&1; then gofmt -s -w .; fi

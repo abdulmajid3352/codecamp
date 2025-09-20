@@ -30,7 +30,6 @@ jobs:
 
       - name: Run Codex (headless)
         id: codex
-        continue-on-error: true
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -38,9 +37,8 @@ jobs:
           codex --version
           git reset --hard
           git clean -fd
-          codex login --api-key "${OPENAI_API_KEY}"
           set +e
-          codex exec --full-auto "$(cat prompts/gke-latest.md)"
+          OPENAI_API_KEY="$OPENAI_API_KEY" codex exec --full-auto --search "$(cat prompts/gke-latest.md)"
           CODE=$?
           set -e
           if command -v gofmt >/dev/null 2>&1; then gofmt -s -w .; fi
@@ -55,7 +53,7 @@ jobs:
         if: steps.codex.outputs.changed == '1'
         uses: peter-evans/create-pull-request@v6
         with:
-          # If your org blocks PRs from GITHUB_TOKEN, add a PAT secret and uncomment:
+          # If your repo blocks PRs from GITHUB_TOKEN, add a PAT and uncomment:
           # token: ${{ secrets.CREATE_PR_TOKEN }}
           commit-message: "chore(gke): add latest Stable R releases"
           title: "chore(gke): add latest Stable R releases"

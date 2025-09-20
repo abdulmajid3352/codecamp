@@ -143,7 +143,7 @@ def call_openai(prompt_text: str) -> str:
             {"role": "system", "content": system_msg},
             {"role": "user", "content": prompt_text},
         ],
-        "temperature": 0,
+        "temperature": 1,
     }
     try:
         r = requests.post(chat_url, headers=headers, json=chat_body, timeout=180)

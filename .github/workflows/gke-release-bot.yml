@@ -28,21 +28,34 @@ jobs:
         with:
           go-version: "1.22.x"
 
-      - name: Make script executable
-        run: chmod +x scripts/run_codex.sh
-
       - name: Run Codex (headless)
         id: codex
+        continue-on-error: true
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # CODEX_PROMPT: prompts/gke-latest.md  # override if your path differs
-        run: scripts/run_codex.sh
+        run: |
+          npm install -g @openai/codex
+          codex --version
+          git reset --hard
+          git clean -fd
+          codex login --api-key "${OPENAI_API_KEY}"
+          set +e
+          codex exec --full-auto "$(cat prompts/gke-latest.md)"
+          CODE=$?
+          set -e
+          if command -v gofmt >/dev/null 2>&1; then gofmt -s -w .; fi
+          if git diff --quiet; then
+            echo "changed=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=1" >> "$GITHUB_OUTPUT"
+          fi
+          echo "status=${CODE}" >> "$GITHUB_OUTPUT"
 
       - name: Create PR
         if: steps.codex.outputs.changed == '1'
         uses: peter-evans/create-pull-request@v6
         with:
-          # If your repo blocks GITHUB_TOKEN PRs, add a PAT and uncomment:
+          # If your org blocks PRs from GITHUB_TOKEN, add a PAT secret and uncomment:
           # token: ${{ secrets.CREATE_PR_TOKEN }}
           commit-message: "chore(gke): add latest Stable R releases"
           title: "chore(gke): add latest Stable R releases"
@@ -52,3 +65,7 @@ jobs:
           branch: chore/gke-release-auto
           delete-branch: true
           signoff: true
+
+      - name: Fail if Codex errored without changes
+        if: ${{ steps.codex.outputs.status != '0' && steps.codex.outputs.changed != '1' }}
+        run: exit 1

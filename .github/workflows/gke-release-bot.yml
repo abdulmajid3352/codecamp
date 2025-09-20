@@ -12,200 +12,82 @@ permissions:
 jobs:
   update-map:
     runs-on: ubuntu-latest
-    env:
-      # Force non-interactive mode for CI
-      CODEX_QUIET_MODE: 1
-      FORCE_COLOR: 0
-      NO_COLOR: 1
-      CI: true
-      # Codex configuration
-      CODEX_AUTH_METHOD: api-key
-      CODEX_PROVIDER: openai
-      CODEX_MODEL: gpt-4o
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+        with: { fetch-depth: 0 }
 
       - name: Set up Node
         uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
+        with: { node-version: "20" }
 
-      - name: Set up Go (for gofmt)
+      - name: Set up Go
         uses: actions/setup-go@v5
-        with:
-          go-version: "1.22.x"
-          cache: true
+        with: { go-version: "1.22.x" }
 
-      - name: Verify prompt file exists
-        run: |
-          if [ ! -f "prompts/gke-latest.md" ]; then
-            echo "❌ Prompt file not found: prompts/gke-latest.md"
-            exit 1
-          fi
-          echo "✅ Prompt file found"
-          echo "Prompt content preview:"
-          head -5 prompts/gke-latest.md
-
-      - name: Install Codex CLI
-        run: |
-          npm install -g @openai/codex@latest
-          echo "Installed Codex version:"
-          codex --version || echo "Could not get version"
-
-      - name: Debug Codex CLI capabilities
-        run: |
-          echo "=== Codex Help ==="
-          codex --help || echo "Basic help failed"
-          echo ""
-          echo "=== Codex Exec Help ==="
-          codex exec --help || echo "Exec help failed"
-          echo ""
-          echo "=== Available Commands ==="
-          codex --help | grep -A 20 "Commands:" || echo "Could not list commands"
-
-      - name: Prepare clean workspace
-        run: |
-          git reset --hard HEAD
-          git clean -fd
-          git status
-
-      - name: Run Codex (Multiple Fallback Approaches)
-        id: codex
+      - name: Verify OpenAI API access
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          set +e  # Allow commands to fail so we can handle errors
-
-          # Read the prompt
-          PROMPT_CONTENT=$(cat prompts/gke-latest.md)
-          echo "Using prompt (first 100 chars): ${PROMPT_CONTENT:0:100}..."
-
-          # Try multiple approaches in order of preference
-          SUCCESS=0
-
-          echo "🔄 Attempt 1: Using exec with auto flags..."
-          if codex exec --auto --quiet --no-interaction "$PROMPT_CONTENT" 2>&1; then
-            echo "✅ Attempt 1 succeeded"
-            SUCCESS=1
-          else
-            echo "❌ Attempt 1 failed"
+          test -n "$OPENAI_API_KEY" || { echo "OPENAI_API_KEY is empty"; exit 1; }
+          HDR=(-H "Authorization: Bearer $OPENAI_API_KEY")
+          [ -n "$OPENAI_PROJECT" ] && HDR+=(-H "OpenAI-Project: $OPENAI_PROJECT")
+          [ -n "$OPENAI_ORGANIZATION" ] && HDR+=(-H "OpenAI-Organization: $OPENAI_ORGANIZATION")
+          CODE=$(curl -sS -o /tmp/models.json -w "%{http_code}" "${HDR[@]}" https://api.openai.com/v1/models)
+          echo "GET /v1/models -> HTTP $CODE"
+          if [ "$CODE" -lt 200 ] || [ "$CODE" -ge 300 ]; then
+            echo "Body:"; cat /tmp/models.json; exit 1
           fi
 
-          if [ $SUCCESS -eq 0 ]; then
-            echo "🔄 Attempt 2: Using exec with minimal flags..."
-            if codex exec --quiet "$PROMPT_CONTENT" 2>&1; then
-              echo "✅ Attempt 2 succeeded"
-              SUCCESS=1
-            else
-              echo "❌ Attempt 2 failed"
-            fi
-          fi
-
-          if [ $SUCCESS -eq 0 ]; then
-            echo "🔄 Attempt 3: Using basic exec..."
-            if timeout 300 codex exec "$PROMPT_CONTENT" 2>&1; then
-              echo "✅ Attempt 3 succeeded"
-              SUCCESS=1
-            else
-              echo "❌ Attempt 3 failed"
-            fi
-          fi
-
-          if [ $SUCCESS -eq 0 ]; then
-            echo "🔄 Attempt 4: Using different command structure..."
-            echo "$PROMPT_CONTENT" | timeout 300 codex exec 2>&1 && SUCCESS=1 || echo "❌ Attempt 4 failed"
-          fi
-
-          # Record the final status
-          echo "status=$SUCCESS" >> "$GITHUB_OUTPUT"
-
-          set -e  # Re-enable strict error handling
-
-      - name: Format Go code if present
+      - name: Install Codex
         run: |
-          if command -v gofmt >/dev/null 2>&1; then
-            echo "🔧 Running gofmt..."
-            find . -name "*.go" -type f -exec gofmt -s -w {} + 2>/dev/null || echo "No Go files found or gofmt failed"
-          else
-            echo "⚠️ gofmt not available"
-          fi
+          npm install -g @openai/codex
+          codex --version
 
-      - name: Check for changes
-        id: changes
+      - name: Run Codex (headless)
+        id: codex
+        env:
+          # Auth & scoping (ensure these secrets exist as needed)
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_PROJECT: ${{ secrets.OPENAI_PROJECT }}
+          OPENAI_ORGANIZATION: ${{ secrets.OPENAI_ORGANIZATION }}
+          # Force Codex auth/matrix
+          CODEX_AUTH_METHOD: api-key
+          CODEX_PROVIDER: openai
+          CODEX_MODEL: gpt-4o
         run: |
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No changes detected"
+          test -f prompts/gke-latest.md || { echo "prompt not found: prompts/gke-latest.md"; exit 2; }
+          git reset --hard
+          git clean -fd
+          set +e
+          OPENAI_API_KEY="$OPENAI_API_KEY" \
+          OPENAI_PROJECT="$OPENAI_PROJECT" \
+          OPENAI_ORGANIZATION="$OPENAI_ORGANIZATION" \
+          codex exec --full-auto "$(cat prompts/gke-latest.md)"
+          CODE=$?
+          set -e
+          command -v gofmt >/dev/null 2>&1 && gofmt -s -w .
+          if git diff --quiet; then
             echo "changed=0" >> "$GITHUB_OUTPUT"
           else
-            echo "Changes detected:"
-            git diff --cached --name-only
             echo "changed=1" >> "$GITHUB_OUTPUT"
           fi
+          echo "status=${CODE}" >> "$GITHUB_OUTPUT"
 
-      - name: Show diff for debugging
-        if: steps.changes.outputs.changed == '1'
-        run: |
-          echo "=== Git Status ==="
-          git status
-          echo ""
-          echo "=== Changes Made ==="
-          git diff --cached || echo "Could not show diff"
-
-      - name: Create Pull Request
-        if: steps.changes.outputs.changed == '1' && steps.codex.outputs.status == '1'
+      - name: Create PR
+        if: steps.codex.outputs.changed == '1'
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "chore(gke): add latest Stable R releases"
           title: "chore(gke): add latest Stable R releases"
           body: |
-            🤖 **Automated GKE Release Update**
-
-            This PR was automatically generated by the GKE Release Bot using the Codex CLI.
-
-            **Details:**
-            - Triggered by: `${{ github.event_name }}`
-            - Workflow: `${{ github.workflow }}`
-            - Run: `${{ github.run_number }}`
-            - Prompt used: `prompts/gke-latest.md`
-
-            **Changes:**
-            Updates to `GKEProjectReleases` (Stable channel only) based on the latest available releases.
-
-            Please review the changes carefully before merging.
-          branch: chore/gke-release-auto-${{ github.run_number }}
+            Automated update of `GKEProjectReleases` (Stable channel only),
+            using daily workflow and the prompt in `prompts/gke-latest.md`.
+          branch: chore/gke-release-auto
           delete-branch: true
           signoff: true
-          assignees: ${{ github.actor }}
 
-      - name: Handle failure cases
-        if: always()
-        run: |
-          echo "=== Final Status Report ==="
-          echo "Codex execution status: ${{ steps.codex.outputs.status }}"
-          echo "Changes detected: ${{ steps.changes.outputs.changed }}"
-
-          if [ "${{ steps.codex.outputs.status }}" != "1" ] && [ "${{ steps.changes.outputs.changed }}" != "1" ]; then
-            echo "❌ Codex failed and no changes were made"
-            echo "This might indicate:"
-            echo "  1. Codex CLI compatibility issues with GitHub Actions"
-            echo "  2. Authentication problems"
-            echo "  3. Invalid command flags"
-            echo "  4. Prompt processing errors"
-            exit 1
-          elif [ "${{ steps.codex.outputs.status }}" != "1" ] && [ "${{ steps.changes.outputs.changed }}" == "1" ]; then
-            echo "⚠️  Codex reported failure but changes were detected"
-            echo "Proceeding with PR creation as changes exist"
-          elif [ "${{ steps.codex.outputs.status }}" == "1" ] && [ "${{ steps.changes.outputs.changed }}" != "1" ]; then
-            echo "✅ Codex succeeded but no changes needed"
-            echo "This is normal - no updates available"
-          else
-            echo "✅ Codex succeeded and changes were made"
-          fi
+      - name: Fail if Codex errored without changes
+        if: ${{ steps.codex.outputs.status != '0' && steps.codex.outputs.changed != '1' }}
+        run: exit 1

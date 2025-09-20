@@ -118,17 +118,69 @@ def sections_above_top(html, top):
     print(f"[debug] TOP={top} | headers_on_page={len(ordered)} | idx_of_top={idx} | new_above_top={len(new_hdrs)} | extracted={len(out)} | R_ids={[x['rid'] for x in out]}")
     return out
 
-def call_openai(prompt_text):
+def call_openai(prompt_text: str) -> str:
+    """
+    Calls OpenAI. Tries chat.completions first (widely supported). Falls back to responses.
+    Prints server error bodies for easier debugging. Returns the model's text.
+    """
     import requests
-    url = "https://api.openai.com/v1/responses"
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-    body = {"model": OPENAI_MODEL, "input": prompt_text, "temperature": 0}
-    r = requests.post(url, headers=headers, json=body, timeout=120)
-    r.raise_for_status()
-    data = r.json()
-    # responses API: flatten text
-    text = data.get("output", {}).get("text") or data.get("output_text") or ""
-    return text.strip()
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    # A tiny system preface improves JSON-only compliance when using chat.completions
+    system_msg = (
+        "You are a precise data extractor. "
+        "Return ONLY strict JSON with no prose, no code fences."
+    )
+
+    # --- Try Chat Completions first ---
+    chat_url = "https://api.openai.com/v1/chat/completions"
+    chat_body = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": prompt_text},
+        ],
+        "temperature": 0,
+    }
+    try:
+        r = requests.post(chat_url, headers=headers, json=chat_body, timeout=180)
+        if r.status_code == 200:
+            data = r.json()
+            text = data["choices"][0]["message"]["content"]
+            return text.strip()
+        else:
+            # Log server message; do not raise yet—fall back to Responses API
+            print(f"[openai-chat] {r.status_code} {r.text}", file=sys.stderr)
+    except Exception as e:
+        print(f"[openai-chat] exception: {e}", file=sys.stderr)
+
+    # --- Fallback: Responses API ---
+    resp_url = "https://api.openai.com/v1/responses"
+    # NOTE: Some deployments require generation config nested; keep it minimal.
+    resp_body = {
+        "model": OPENAI_MODEL,
+        "input": prompt_text,
+        # "max_output_tokens": 4096,  # optional; uncomment if needed
+    }
+    r2 = requests.post(resp_url, headers=headers, json=resp_body, timeout=180)
+    if r2.status_code >= 400:
+        # Print the full server-provided error body so you know *why*
+        print(f"[openai-responses] {r2.status_code} {r2.text}", file=sys.stderr)
+    r2.raise_for_status()
+
+    data = r2.json()
+    # Responses API can return 'output_text' or a structured 'output' list
+    text = data.get("output_text")
+    if not text:
+        try:
+            # output[0].content[0].text shape
+            text = data["output"][0]["content"][0]["text"]
+        except Exception:
+            text = ""
+    return (text or "").strip()
 
 def merge_entries(entries):
     with open(GKE_GO_PATH, "r", encoding="utf-8") as f:

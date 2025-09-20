@@ -1,0 +1,57 @@
+name: GKE Release Bot
+
+on:
+  schedule:
+    - cron: "40 11 * * *" # once a day at 11:40 UTC
+  workflow_dispatch: {}
+
+concurrency:
+  group: gke-release-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-map:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Run updater (calls your prompt + merges file)
+        id: runbot
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-5
+        run: |
+          python scripts/update_gke_map.py || CODE=$?
+          echo "status=${CODE:-0}" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Create PR
+        if: steps.runbot.outputs.status == '10'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore(gke): add latest Stable R releases"
+          title: "chore(gke): add latest Stable R releases"
+          body: |
+            Automated update of `GKEProjectReleases` (Stable channel only),
+            using daily workflow and the prompt in `prompts/gke-latest.md`.
+          branch: chore/gke-release-auto
+          delete-branch: true
+          signoff: true

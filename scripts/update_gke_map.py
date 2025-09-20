@@ -20,18 +20,29 @@ def fetch_release_notes():
     return r.text
 
 def sections_above_top(html, top):
+    from bs4 import BeautifulSoup, Tag
+    import re
+
     soup = BeautifulSoup(html, "html.parser")
-    headers = soup.select('h4[id$="_version_updates"][data-text*="Version updates"]')
-    rid_rx = re.compile(r"\((\d{4}-R\d{2})\)\s*Version updates")
+
+    # 1) Find all "(YYYY-RXX) Version updates" H4 headers.
+    #    Accept BOTH hyphen and underscore id suffixes.
+    headers = soup.find_all(
+        lambda t: t.name == "h4"
+        and (t.get("id", "").endswith("-version-updates") or t.get("id", "").endswith("_version_updates"))
+        and (t.get("data-text", "") or t.get_text(" ", strip=True)).strip().endswith("Version updates")
+    )
+
+    rid_rx = re.compile(r"\((\d{4}-R\d{2})\)\s*Version updates", re.I)
+
     ordered = []
     for h in headers:
-        dt = h.get("data-text", "") or h.get_text(strip=True)
-        m = rid_rx.search(dt)
-        if not m: 
-            continue
-        ordered.append((m.group(1), h))
+        label = h.get("data-text", "") or h.get_text(" ", strip=True)
+        m = rid_rx.search(label)
+        if m:
+            ordered.append((m.group(1), h))
 
-    # Find index of TOP_EXISTING on page
+    # 2) Find index of TOP on the page.
     idx = None
     if top:
         for i, (rid, _) in enumerate(ordered):
@@ -39,38 +50,72 @@ def sections_above_top(html, top):
                 idx = i
                 break
 
-    # New = everything above TOP on the page; if TOP not found, consider all
+    # New = everything above TOP (newest-first). If TOP not found, take all.
     new_hdrs = ordered[:idx] if idx is not None else ordered
+
     out = []
     for rid, h in new_hdrs:
-        # find tabset near this header
+        # 3) Prefer to scope to the first devsite tabset AFTER this header,
+        #    but STOP when the next R header begins.
         tabset = None
-        for sib in h.find_all_next():
-            if getattr(sib, "name", "") == "div" and "devsite-tabs" in (sib.get("class") or []):
+        for sib in h.next_siblings:
+            if isinstance(sib, Tag) and sib.name == "div" and "devsite-tabs" in (sib.get("class") or []):
                 tabset = sib
                 break
-        if not tabset:
-            continue
-        # locate Stable tab -> aria-controls
-        stable_tab = None
-        for a in tabset.select('a[role="tab"], a[role="button"]'):
-            if a.get_text(strip=True).lower() == "stable":
-                stable_tab = a
-                break
-        panel = None
-        if stable_tab:
-            pid = stable_tab.get("aria-controls") or ""
-            if pid:
-                panel = tabset.select_one(f'section[role="tabpanel"]#{pid}')
-        if not panel:
-            panel = tabset.select_one('section#tabpanel-stable-channel[role="tabpanel"]')
-        if not panel:
+            if isinstance(sib, Tag) and sib.name in ("h3", "h4"):
+                if rid_rx.search(sib.get_text(" ", strip=True) or ""):
+                    break
+
+        stable_panel = None
+        if tabset:
+            # 4) Stable tab → aria-controls → panel (robust to active state).
+            stable_tab = None
+            for a in tabset.select('a[role="tab"], a[role="button"]'):
+                if a.get_text(strip=True).lower() == "stable":
+                    stable_tab = a
+                    break
+            if stable_tab:
+                pid = stable_tab.get("aria-controls") or ""
+                if pid:
+                    stable_panel = tabset.select_one(f'section[role="tabpanel"]#{pid}')
+            if not stable_panel:
+                # fallback to known id if present
+                stable_panel = tabset.select_one('section#tabpanel-stable-channel[role="tabpanel"]')
+
+        if not stable_panel:
+            # 5) Fallback (no tabset): take the block until next R header
+            #    and keep elements that mention "Stable".
+            block_nodes = []
+            for sib in h.next_siblings:
+                if isinstance(sib, Tag) and sib.name in ("h3", "h4") and rid_rx.search(sib.get_text(" ", strip=True) or ""):
+                    break
+                block_nodes.append(sib)
+            block_html = "".join(str(n) for n in block_nodes)
+            block = BeautifulSoup(block_html, "html.parser")
+            candidates = [
+                el for el in block.find_all(["h5", "h6", "strong", "p", "li"])
+                if "stable" in el.get_text(" ", strip=True).lower()
+            ]
+            stable_panel = candidates[0] if candidates else None
+
+        if not stable_panel:
+            # Skip gracefully if Stable content still not found
             continue
 
-        # anchor for provenance (closest previous h2/h3 id)
-        anchor_el = h.find_previous(["h2", "h3"])
-        anchor = f'#{anchor_el.get("id")}' if anchor_el and anchor_el.get("id") else ""
-        out.append({"rid": rid, "stable_panel_html": str(panel), "source": RELEASE_NOTES_URL + anchor})
+        # 6) Build anchor (nearest previous h2/h3 id) for provenance
+        anc = ""
+        parent_anchor = h.find_previous(["h2", "h3"])
+        if parent_anchor and parent_anchor.get("id"):
+            anc = f'#{parent_anchor.get("id")}'
+
+        out.append({
+            "rid": rid,
+            "stable_panel_html": str(stable_panel),  # kept as HTML for the model
+            "source": RELEASE_NOTES_URL + anc
+        })
+
+    # Useful debug in workflow logs
+    print(f"[debug] TOP={top} | headers_on_page={len(ordered)} | idx_of_top={idx} | new_above_top={len(new_hdrs)} | extracted={len(out)} | R_ids={[x['rid'] for x in out]}")
     return out
 
 def call_openai(prompt_text):

@@ -2,12 +2,8 @@ name: GKE Release Bot (Codex)
 
 on:
   schedule:
-    - cron: "40 11 * * *" # daily at 11:40 UTC
+    - cron: "40 11 * * *"
   workflow_dispatch: {}
-
-concurrency:
-  group: gke-release-bot
-  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -16,43 +12,36 @@ permissions:
 jobs:
   update-map:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up Node (for Codex CLI via npm)
+      - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Set up Go (optional; used only for gofmt)
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.22.x"
 
-      # Make your script executable
       - name: Make script executable
         run: chmod +x scripts/run_codex.sh
 
-      # Run your Codex-based updater
       - name: Run Codex
         id: codex
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # Optionally override Codex install/command:
-          # CODEX_INSTALL: npm i -g @codex-ai/cli
-          # CODEX_CMD: codex run --prompt prompts/gke-latest.md
         run: scripts/run_codex.sh
 
       - name: Create PR
         if: steps.codex.outputs.changed == '1'
         uses: peter-evans/create-pull-request@v6
         with:
-          # If your repo blocks GITHUB_TOKEN PRs, add a PAT secret and uncomment:
-          # token: ${{ secrets.CREATE_PR_TOKEN }}
+          token: ${{ secrets.CREATE_PR_TOKEN }}
           commit-message: "chore(gke): add latest Stable R releases"
           title: "chore(gke): add latest Stable R releases"
           body: |

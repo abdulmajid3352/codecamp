@@ -5,7 +5,7 @@ from bs4 import BeautifulSoup
 RELEASE_NOTES_URL = "https://cloud.google.com/kubernetes-engine/docs/release-notes"
 GKE_GO_PATH = "pkg/project/gke.go"
 PROMPT_PATH = "prompts/gke-latest.md"
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-o3")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 def top_existing():

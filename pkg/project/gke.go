@@ -43,6 +43,27 @@ var GKECurationConfig = &model.ProjectCurationConfig{
 }
 
 var GKEProjectReleases = []model.ProjectRelease{
+    {
+        Project: GKE.ID,
+        Version: "2025-R39",
+        RelatedProjectReleases: []string{
+            "kube@1.30.14",
+            "kube@1.32.8",
+            "kube@1.33.4"
+        },
+    },
+    // source: https://cloud.google.com/kubernetes-engine/docs/release-notes#September_18_2025
+
+    {
+        Project: GKE.ID,
+        Version: "2025-R38",
+        RelatedProjectReleases: []string{
+            "kube@1.30.14",
+            "kube@1.32.7"
+        },
+    },
+    // source: https://cloud.google.com/kubernetes-engine/docs/release-notes#September_11_2025
+
 	{
 		Project: GKE.ID,
 		Version: "2025-R37",

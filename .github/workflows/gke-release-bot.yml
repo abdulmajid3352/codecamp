@@ -16,7 +16,7 @@ jobs:
       # Force Codex authentication & model so CI doesn't guess.
       CODEX_AUTH_METHOD: api-key
       CODEX_PROVIDER: openai
-      CODEX_MODEL: gpt-4o-mini
+      CODEX_MODEL: gpt-4o
       # If your account requires these, add as repo secrets and uncomment:
       # OPENAI_ORGANIZATION: ${{ secrets.OPENAI_ORGANIZATION }}
       # OPENAI_PROJECT: ${{ secrets.OPENAI_PROJECT }}

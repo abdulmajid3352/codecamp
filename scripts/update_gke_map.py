@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-import os, re, sys, json, subprocess, requests
+# -*- coding: utf-8 -*-
+
+import os
+import re
+import sys
+import json
+import time
+import subprocess
+import requests
 from bs4 import BeautifulSoup
 
 RELEASE_NOTES_URL = "https://cloud.google.com/kubernetes-engine/docs/release-notes"
@@ -15,24 +23,32 @@ def top_existing():
     return m.group(1) if m else None
 
 def fetch_release_notes():
-    r = requests.get(RELEASE_NOTES_URL, timeout=60)
-    r.raise_for_status()
-    return r.text
+    headers = {"User-Agent": "chkk-gke-bot/1.0 (+https://github.com/your-org/your-repo)"}
+    last_exc = None
+    for attempt in range(3):
+        try:
+            r = requests.get(RELEASE_NOTES_URL, headers=headers, timeout=60)
+            if r.status_code >= 500:
+                time.sleep(1 + attempt)
+                continue
+            r.raise_for_status()
+            return r.text
+        except Exception as e:
+            last_exc = e
+            time.sleep(1 + attempt)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Unable to fetch release notes")
 
 def sections_above_top(html, top):
-    from bs4 import BeautifulSoup, Tag
-    import re
-
+    from bs4 import Tag
     soup = BeautifulSoup(html, "html.parser")
 
-    # 1) Find all "(YYYY-RXX) Version updates" H4 headers.
-    #    Accept BOTH hyphen and underscore id suffixes.
     headers = soup.find_all(
         lambda t: t.name == "h4"
         and (t.get("id", "").endswith("-version-updates") or t.get("id", "").endswith("_version_updates"))
         and (t.get("data-text", "") or t.get_text(" ", strip=True)).strip().endswith("Version updates")
     )
-
     rid_rx = re.compile(r"\((\d{4}-R\d{2})\)\s*Version updates", re.I)
 
     ordered = []
@@ -42,7 +58,6 @@ def sections_above_top(html, top):
         if m:
             ordered.append((m.group(1), h))
 
-    # 2) Find index of TOP on the page.
     idx = None
     if top:
         for i, (rid, _) in enumerate(ordered):
@@ -50,13 +65,10 @@ def sections_above_top(html, top):
                 idx = i
                 break
 
-    # New = everything above TOP (newest-first). If TOP not found, take all.
     new_hdrs = ordered[:idx] if idx is not None else ordered
 
     out = []
     for rid, h in new_hdrs:
-        # 3) Prefer to scope to the first devsite tabset AFTER this header,
-        #    but STOP when the next R header begins.
         tabset = None
         for sib in h.next_siblings:
             if isinstance(sib, Tag) and sib.name == "div" and "devsite-tabs" in (sib.get("class") or []):
@@ -68,7 +80,6 @@ def sections_above_top(html, top):
 
         stable_panel = None
         if tabset:
-            # 4) Stable tab → aria-controls → panel (robust to active state).
             stable_tab = None
             for a in tabset.select('a[role="tab"], a[role="button"]'):
                 if a.get_text(strip=True).lower() == "stable":
@@ -79,12 +90,9 @@ def sections_above_top(html, top):
                 if pid:
                     stable_panel = tabset.select_one(f'section[role="tabpanel"]#{pid}')
             if not stable_panel:
-                # fallback to known id if present
                 stable_panel = tabset.select_one('section#tabpanel-stable-channel[role="tabpanel"]')
 
         if not stable_panel:
-            # 5) Fallback (no tabset): take the block until next R header
-            #    and keep elements that mention "Stable".
             block_nodes = []
             for sib in h.next_siblings:
                 if isinstance(sib, Tag) and sib.name in ("h3", "h4") and rid_rx.search(sib.get_text(" ", strip=True) or ""):
@@ -99,10 +107,8 @@ def sections_above_top(html, top):
             stable_panel = candidates[0] if candidates else None
 
         if not stable_panel:
-            # Skip gracefully if Stable content still not found
             continue
 
-        # 6) Build anchor (nearest previous h2/h3 id) for provenance
         anc = ""
         parent_anchor = h.find_previous(["h2", "h3"])
         if parent_anchor and parent_anchor.get("id"):
@@ -110,98 +116,107 @@ def sections_above_top(html, top):
 
         out.append({
             "rid": rid,
-            "stable_panel_html": str(stable_panel),  # kept as HTML for the model
+            "stable_panel_html": str(stable_panel),
             "source": RELEASE_NOTES_URL + anc
         })
 
-    # Useful debug in workflow logs
     print(f"[debug] TOP={top} | headers_on_page={len(ordered)} | idx_of_top={idx} | new_above_top={len(new_hdrs)} | extracted={len(out)} | R_ids={[x['rid'] for x in out]}")
     return out
 
+def _parse_json_lenient(text: str):
+    try:
+        return json.loads(text)
+    except Exception:
+        s = text.strip()
+        if s.startswith("```"):
+            s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.DOTALL)
+            s = re.sub(r"\s*```$", "", s, flags=re.DOTALL)
+        if "{" in s and "}" in s:
+            s2 = s[s.find("{"):s.rfind("}") + 1]
+            return json.loads(s2)
+        raise
+
 def call_openai(prompt_text: str) -> str:
-    """
-    Calls OpenAI. Tries chat.completions first (widely supported). Falls back to responses.
-    Prints server error bodies for easier debugging. Returns the model's text.
-    """
-    import requests
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
+    system_msg = "You are a precise data extractor. Return ONLY strict JSON with no prose and no code fences."
 
-    # A tiny system preface improves JSON-only compliance when using chat.completions
-    system_msg = (
-        "You are a precise data extractor. "
-        "Return ONLY strict JSON with no prose, no code fences."
-    )
-
-    # --- Try Chat Completions first ---
     chat_url = "https://api.openai.com/v1/chat/completions"
-    chat_body = {
+    chat_body_json = {
         "model": OPENAI_MODEL,
         "messages": [
             {"role": "system", "content": system_msg},
             {"role": "user", "content": prompt_text},
         ],
-        "temperature": 1,
+        "response_format": {"type": "json_object"},
     }
     try:
-        r = requests.post(chat_url, headers=headers, json=chat_body, timeout=180)
+        r = requests.post(chat_url, headers=headers, json=chat_body_json, timeout=180)
         if r.status_code == 200:
             data = r.json()
             text = data["choices"][0]["message"]["content"]
-            return text.strip()
+            return (text or "").strip()
         else:
-            # Log server message; do not raise yet—fall back to Responses API
+            print(f"[openai-chat/json] {r.status_code} {r.text}", file=sys.stderr)
+    except Exception as e:
+        print(f"[openai-chat/json] exception: {e}", file=sys.stderr)
+
+    chat_body_plain = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": prompt_text},
+        ],
+    }
+    try:
+        r = requests.post(chat_url, headers=headers, json=chat_body_plain, timeout=180)
+        if r.status_code == 200:
+            data = r.json()
+            text = data["choices"][0]["message"]["content"]
+            return (text or "").strip()
+        else:
             print(f"[openai-chat] {r.status_code} {r.text}", file=sys.stderr)
     except Exception as e:
         print(f"[openai-chat] exception: {e}", file=sys.stderr)
 
-    # --- Fallback: Responses API ---
     resp_url = "https://api.openai.com/v1/responses"
-    # NOTE: Some deployments require generation config nested; keep it minimal.
-    resp_body = {
-        "model": OPENAI_MODEL,
-        "input": prompt_text,
-        # "max_output_tokens": 4096,  # optional; uncomment if needed
-    }
+    resp_body = {"model": OPENAI_MODEL, "input": prompt_text}
     r2 = requests.post(resp_url, headers=headers, json=resp_body, timeout=180)
     if r2.status_code >= 400:
-        # Print the full server-provided error body so you know *why*
         print(f"[openai-responses] {r2.status_code} {r2.text}", file=sys.stderr)
     r2.raise_for_status()
-
     data = r2.json()
-    # Responses API can return 'output_text' or a structured 'output' list
     text = data.get("output_text")
     if not text:
         try:
-            # output[0].content[0].text shape
             text = data["output"][0]["content"][0]["text"]
         except Exception:
-            text = ""
+            try:
+                text = data["choices"][0]["message"]["content"]
+            except Exception:
+                text = ""
     return (text or "").strip()
 
 def merge_entries(entries):
     with open(GKE_GO_PATH, "r", encoding="utf-8") as f:
         content = f.read()
-    anchor = "GKEProjectReleases"
-    idx = content.find(anchor)
-    if idx < 0:
-        print("Could not find GKEProjectReleases in file", file=sys.stderr)
-        sys.exit(2)
-    array_start = content.find("{", idx)
-    if array_start < 0:
-        print("Could not find array opening brace", file=sys.stderr)
+
+    m = re.search(r"(?:var\s+)?GKEProjectReleases\s*=\s*\[\]\s*ProjectRelease\s*{", content)
+    if not m:
+        print("Could not find GKEProjectReleases array", file=sys.stderr)
         sys.exit(2)
 
+    array_start = m.end() - 1
+
     def semkey(v):
-        m = re.search(r"(\d+)\.(\d+)\.(\d+)", v)
-        return tuple(int(x) for x in m.groups()) if m else (0,0,0)
+        mm = re.search(r"(\d+)\.(\d+)\.(\d+)", v)
+        return tuple(int(x) for x in mm.groups()) if mm else (0, 0, 0)
 
     blocks = []
     for e in entries:
-        uniq = sorted(sorted(set(e["RelatedProjectReleases"])), key=semkey)
+        uniq = sorted(set(e["RelatedProjectReleases"]), key=semkey)
         inner = ",\n            ".join(f"\"{v}\"" for v in uniq)
         block = f"""
     {{
@@ -218,8 +233,10 @@ def merge_entries(entries):
     new_content = content[:array_start+1] + "".join(blocks) + content[array_start+1:]
     if new_content == content:
         return False
+
     with open(GKE_GO_PATH, "w", encoding="utf-8") as f:
         f.write(new_content)
+
     try:
         subprocess.run(["gofmt", "-s", "-w", "."], check=False)
     except Exception:
@@ -238,14 +255,20 @@ def main():
         print("No new releases above TOP; exiting.")
         sys.exit(0)
 
-    with open(PROMPT_PATH, "r", encoding="utf-8") as f:
-        base_prompt = f.read()
+    try:
+        with open(PROMPT_PATH, "r", encoding="utf-8") as f:
+            base_prompt = f.read()
+    except Exception as e:
+        print(f"Failed to read prompt file {PROMPT_PATH}: {e}", file=sys.stderr)
+        sys.exit(2)
 
-    # Build final prompt sent to the model
     user_payload = {
-        "instruction": "Extract ALL Stable-channel Kubernetes versions per release (defaults/newly available/removed). "
-                       "Normalize to kube@X.Y.Z (strip -gke*, -autopilot*, +cos*). De-duplicate and sort by full SemVer ascending. "
-                       "Return ONLY JSON in the schema below.",
+        "instruction": (
+            "Extract ALL Stable-channel Kubernetes versions per release "
+            "(defaults/newly available/removed). Normalize to kube@X.Y.Z "
+            "(strip -gke*, -autopilot*, +cos*). De-duplicate and sort by "
+            "full SemVer ascending. Return ONLY JSON in the schema below."
+        ),
         "schema": {
             "entries": [{
                 "Version": "YYYY-RXX",
@@ -259,8 +282,12 @@ def main():
     final_prompt = base_prompt + "\n\nContext:\n" + json.dumps(user_payload, ensure_ascii=False)
 
     raw = call_openai(final_prompt)
+    if not raw:
+        print("Model returned empty output.", file=sys.stderr)
+        sys.exit(2)
+
     try:
-        data = json.loads(raw)
+        data = _parse_json_lenient(raw)
         entries = data.get("entries", [])
     except Exception:
         print("Model did not return valid JSON.\nRaw:\n", raw, file=sys.stderr)

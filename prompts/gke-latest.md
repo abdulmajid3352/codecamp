@@ -4,7 +4,7 @@ Goal: Update the `GKEProjectReleases` array in `gke.go` by adding ONLY new (late
 
 Inputs:
 
-- Path to gke.go: codecamp/pkg/project/gke.go // addon-hub is the repo name
+- Path to gke.go: pkg/project/gke.go
 - Release notes base URL: https://cloud.google.com/kubernetes-engine/docs/release-notes
 
 Definitions:
